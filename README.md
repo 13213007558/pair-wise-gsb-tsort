@@ -60,6 +60,36 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+## Incremental updates
+
+`TSort::UpdatableTopoView` keeps an explicit topological ordering of a
+graph that changes over time.  Instead of re-running `tsort` after every
+update (which reshuffles unrelated nodes), it repairs the ordering
+locally when edges and nodes are added or removed:
+
+```ruby
+view = TSort::UpdatableTopoView.new([:parse, :compile, :link, :pack])
+view.add_edge(:parse, :compile)   # => true
+view.add_edge(:compile, :link)    # => true
+view.order                        # => [:parse, :compile, :link, :pack]
+view.add_edge(:link, :parse)      # => [:link, :parse, :compile, :link]
+view.order                        # unchanged; the view stays usable
+```
+
+`add_edge(u, v)` means "u must appear before v".  If the edge would
+close a cycle, the view is left untouched and the cycle is returned as
+an array of nodes whose first step is the rejected edge and whose
+remaining steps are existing edges.
+
+Stability is defined precisely: `remove_edge` and `remove_node` never
+reorder surviving nodes, and a reordering `add_edge(u, v)` only touches
+the nodes between v and u — nodes outside that region and nodes not
+reachable from v / reaching u keep their exact positions, so a pair of
+nodes can only swap places if the update actually inspected at least
+one of them.  Each update reports the nodes it examined through
+`last_inspected`; updates never scan the whole graph.  See the class
+documentation of `TSort::UpdatableTopoView` for the exact definition.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.

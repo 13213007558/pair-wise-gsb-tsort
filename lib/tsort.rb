@@ -455,3 +455,267 @@ module TSort
     raise NotImplementedError.new
   end
 end
+
+# An updatable topological view of a directed graph.
+#
+# TSort::UpdatableTopoView maintains an explicit topological ordering of
+# a graph that changes over time: edges and nodes can be added and
+# removed one at a time, and the ordering is repaired locally after each
+# update instead of being recomputed from scratch.  It is meant for
+# long-lived services that keep a dependency graph and cannot afford to
+# re-sort the whole graph (and disturb every node's position) on every
+# single edge update.
+#
+# An edge added with +add_edge(u, v)+ means "u must appear before v".
+# Nodes are arbitrary objects; equality is defined by +eql?+ and +hash+,
+# as in the rest of TSort.
+#
+#   view = TSort::UpdatableTopoView.new([:parse, :compile, :link, :pack])
+#   view.add_edge(:parse, :compile)   # => true
+#   view.add_edge(:compile, :link)    # => true
+#   view.order                        # => [:parse, :compile, :link, :pack]
+#   view.add_edge(:link, :parse)      # => [:link, :parse, :compile, :link]
+#   view.order                        # => [:parse, :compile, :link, :pack] (unchanged)
+#
+# == Stability
+#
+# "Stability" is defined precisely as follows.  Let < be the relative
+# order of nodes before an update and <' the relative order after it.
+#
+# * remove_node and remove_edge never reorder anything: for every pair
+#   of surviving nodes x and y, x < y implies x <' y.
+# * add_edge(u, v) with u < v changes nothing.
+# * add_edge(u, v) with v < u repairs the ordering with the
+#   Pearce--Kelly algorithm.  Let R be the nodes between v and u
+#   (inclusive) in the old ordering, F the nodes of R reachable from v,
+#   and B the nodes of R that can reach u.  The update moves B (kept in
+#   its old relative order) in front of F (also kept in its old relative
+#   order) inside the slots previously occupied by B and F.  Then:
+#
+#   1. nodes outside R keep their exact positions;
+#   2. nodes of R that are in neither F nor B keep their exact
+#      positions;
+#   3. the relative order inside F and inside B is preserved;
+#   4. consequently a pair x < y can only be inverted (y <' x) when x
+#      or y belongs to F or B, that is, when the update actually
+#      inspected x or y; two uninspected nodes never change their
+#      relative order.
+#
+#   Every inversion between F and B is unavoidable: each b in B reaches
+#   u and each f in F is reached from v, so b <' f holds in every valid
+#   ordering once the edge u -> v exists.
+#
+# == Locality
+#
+# Updates never scan the whole graph.  Each mutating method records the
+# nodes it actually examined in #last_inspected:
+#
+# * add_edge examines only F and B (just the two endpoints when no
+#   reordering is needed),
+# * remove_edge examines only the two endpoints,
+# * remove_node examines only the node and its former neighbors.
+#
+# (Rewriting position indexes after a node is spliced out of the
+# ordering is index bookkeeping, not graph inspection, and is therefore
+# not counted in #last_inspected.)
+#
+# == References
+#
+# D. J. Pearce, P. H. J. Kelly, "A Dynamic Topological Sort Algorithm
+# for Directed Acyclic Graphs", <em>ACM Journal of Experimental
+# Algorithmics</em>, Vol. 11, 2006.
+#
+class TSort::UpdatableTopoView
+  # Creates a view over _nodes_, which also fixes the initial ordering.
+  # The graph starts without edges; duplicate nodes are rejected.
+  def initialize(nodes = [])
+    order = nodes.dup
+    unless order.uniq.size == order.size
+      raise ArgumentError, "duplicate nodes: #{nodes.inspect}"
+    end
+    @order = order
+    @pos = {}             # node => index in @order
+    @succ = {}            # node => array of successors
+    @pred = {}            # node => array of predecessors
+    @order.each_with_index do |node, i|
+      @pos[node] = i
+      @succ[node] = []
+      @pred[node] = []
+    end
+    @last_inspected = [].freeze
+  end
+
+  # Returns the current topological ordering as a new array.
+  def order
+    @order.dup
+  end
+
+  # Returns the number of nodes.
+  def size
+    @order.size
+  end
+
+  # Returns true if _node_ is part of the view.
+  def include?(node)
+    @pos.key?(node)
+  end
+
+  # Returns the edges as an array of [from, to] pairs.
+  def edges
+    result = []
+    @succ.each_pair do |u, ws|
+      ws.each do |v|
+        result << [u, v]
+      end
+    end
+    result
+  end
+
+  # Returns the nodes examined by the most recent update.
+  # See the "Locality" section of the class documentation.
+  def last_inspected
+    @last_inspected
+  end
+
+  # Adds _node_ at the end of the ordering.
+  # Returns true if the node was added, false if it was already present.
+  def add_node(node)
+    @last_inspected = [node].freeze
+    return false if @pos.key?(node)
+    @pos[node] = @order.size
+    @order << node
+    @succ[node] = []
+    @pred[node] = []
+    true
+  end
+
+  # Adds the edge u -> v ("u must appear before v") and repairs the
+  # ordering locally if needed.  Unknown nodes are added first, at the
+  # end of the ordering.
+  #
+  # Returns true if the edge is present after the call.  If the edge
+  # would close a cycle, the view is left untouched and the cycle is
+  # returned instead, as an array of nodes [u, v, ..., u] whose first
+  # step is the rejected edge u -> v and whose remaining steps are
+  # existing edges.
+  def add_edge(u, v)
+    add_node(u) unless include?(u)
+    add_node(v) unless include?(v)
+    if u.eql?(v)
+      @last_inspected = [u].freeze
+      return [u, u]
+    end
+    if @succ[u].include?(v)
+      @last_inspected = [u, v].freeze
+      return true
+    end
+    iu = @pos[u]
+    iv = @pos[v]
+    if iu < iv
+      # Already ordered; a path v ~> u cannot exist, so no cycle and
+      # no reordering.
+      @succ[u] << v
+      @pred[v] << u
+      @last_inspected = [u, v].freeze
+      return true
+    end
+    # v is before u: only nodes between them can be affected.
+    # F: nodes reachable from v inside the region, with parent links.
+    forward = {v => nil}
+    stack = [v]
+    cyclic = false
+    until stack.empty?
+      n = stack.pop
+      if n.eql?(u)
+        cyclic = true
+        break
+      end
+      @succ[n].each do |w|
+        next if forward.key?(w)
+        next if @pos[w] > iu
+        forward[w] = n
+        stack << w
+      end
+    end
+    if cyclic
+      path = [u]
+      while (parent = forward[path.first])
+        path.unshift(parent)
+      end
+      @last_inspected = forward.keys.freeze
+      return [u, *path]
+    end
+    # B: nodes that can reach u inside the region.
+    backward = {u => true}
+    stack = [u]
+    until stack.empty?
+      n = stack.pop
+      @pred[n].each do |w|
+        next if backward.key?(w)
+        next if @pos[w] < iv
+        backward[w] = true
+        stack << w
+      end
+    end
+    # Move B in front of F inside the slots they already occupy.
+    slots = []
+    bs = []
+    fs = []
+    (iv..iu).each do |i|
+      n = @order[i]
+      if backward.key?(n)
+        slots << i
+        bs << n
+      elsif forward.key?(n)
+        slots << i
+        fs << n
+      end
+    end
+    (bs + fs).each_with_index do |n, k|
+      @order[slots[k]] = n
+      @pos[n] = slots[k]
+    end
+    @succ[u] << v
+    @pred[v] << u
+    @last_inspected = (forward.keys | backward.keys).freeze
+    true
+  end
+
+  # Removes the edge u -> v.  The ordering is left untouched.
+  # Returns true if the edge existed, false otherwise.
+  def remove_edge(u, v)
+    @last_inspected = [u, v].freeze
+    ws = @succ[u]
+    return false unless ws && ws.include?(v)
+    ws.delete(v)
+    @pred[v].delete(u)
+    true
+  end
+
+  # Removes _node_ and its incident edges.  The relative order of the
+  # remaining nodes is preserved exactly.
+  # Returns true if the node existed, false otherwise.
+  def remove_node(node)
+    @last_inspected = [node].freeze
+    return false unless @pos.key?(node)
+    inspected = [node]
+    @succ[node].each do |w|
+      @pred[w].delete(node)
+      inspected << w
+    end
+    @pred[node].each do |w|
+      @succ[w].delete(node)
+      inspected << w
+    end
+    @succ.delete(node)
+    @pred.delete(node)
+    i = @pos.delete(node)
+    @order.delete_at(i)
+    # Re-index the tail; index bookkeeping, not graph inspection.
+    (i...@order.size).each do |k|
+      @pos[@order[k]] = k
+    end
+    @last_inspected = inspected.uniq.freeze
+    true
+  end
+end
