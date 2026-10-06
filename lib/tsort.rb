@@ -130,6 +130,17 @@ module TSort
   class Cyclic < StandardError
   end
 
+  # Exception class to be raised when counting, ranking, unranking or
+  # sampling linear extensions explores more subset states than the
+  # configured state budget allows.
+  class StateBudgetExceeded < StandardError
+  end
+
+  # Default limit on the number of subset states explored by the linear
+  # extension methods.  A graph of n nodes has at most 2**n states, so
+  # the default budget keeps these methods usable for small graphs only.
+  DEFAULT_STATE_BUDGET = 100_000
+
   # Returns a topologically sorted array of nodes.
   # The array is sorted from children to parents, i.e.
   # the first element has no child and the last node has no parent.
@@ -438,6 +449,250 @@ module TSort
 
     minimum_id
   end
+
+  # Returns the exact number of linear extensions of the graph, i.e. the
+  # number of valid execution orders in which every node appears after all
+  # of its children.  The result is a Ruby Integer (bignum when large).
+  #
+  # The count is computed by dynamic programming over subsets of nodes, so
+  # it is only feasible for small graphs.  At most _state_budget_ subset
+  # states are explored; TSort::StateBudgetExceeded is raised when the
+  # budget is exceeded.  TSort::Cyclic is raised if the graph has a cycle.
+  #
+  #   class G
+  #     include TSort
+  #     def initialize(g)
+  #       @g = g
+  #     end
+  #     def tsort_each_child(n, &b) @g[n].each(&b) end
+  #     def tsort_each_node(&b) @g.each_key(&b) end
+  #   end
+  #
+  #   graph = G.new({1=>[2, 3], 2=>[4], 3=>[4], 4=>[]})
+  #   p graph.linear_extension_count #=> 2
+  #
+  def linear_extension_count(state_budget: DEFAULT_STATE_BUDGET)
+    each_node = method(:tsort_each_node)
+    each_child = method(:tsort_each_child)
+    TSort.linear_extension_count(each_node, each_child, state_budget: state_budget)
+  end
+
+  # The class-method version of #linear_extension_count.
+  # The graph is represented by _each_node_ and _each_child_.
+  def self.linear_extension_count(each_node, each_child, state_budget: DEFAULT_STATE_BUDGET)
+    counter = LinearExtensionCounter.new(each_node, each_child, state_budget)
+    total = counter.total
+    raise Cyclic.new("topological sort failed: the graph has a cycle") if total.zero?
+    total
+  end
+
+  # Returns the rank of _order_, a valid execution order (linear
+  # extension) given as an array of nodes from children to parents.
+  # The rank is an Integer in <tt>0...linear_extension_count</tt>, and the
+  # mapping between ranks and orders is a bijection: orders are numbered
+  # lexicographically by the position of each node in #tsort_each_node
+  # order.
+  #
+  # ArgumentError is raised if _order_ is not a valid linear extension of
+  # the graph.  TSort::StateBudgetExceeded is raised when the state budget
+  # is exceeded.
+  #
+  #   graph = G.new({1=>[], 2=>[], 3=>[]})
+  #   p graph.linear_extension_rank([2, 3, 1]) #=> 3
+  #
+  def linear_extension_rank(order, state_budget: DEFAULT_STATE_BUDGET)
+    each_node = method(:tsort_each_node)
+    each_child = method(:tsort_each_child)
+    TSort.linear_extension_rank(order, each_node, each_child, state_budget: state_budget)
+  end
+
+  # The class-method version of #linear_extension_rank.
+  # The graph is represented by _each_node_ and _each_child_.
+  def self.linear_extension_rank(order, each_node, each_child, state_budget: DEFAULT_STATE_BUDGET)
+    counter = LinearExtensionCounter.new(each_node, each_child, state_budget)
+    raise Cyclic.new("topological sort failed: the graph has a cycle") if counter.total.zero?
+    counter.rank(order)
+  end
+
+  # Returns the linear extension whose rank is _rank_; the inverse of
+  # #linear_extension_rank.
+  #
+  # ArgumentError is raised unless _rank_ is an Integer in
+  # <tt>0...linear_extension_count</tt>.  TSort::Cyclic is raised if the
+  # graph has a cycle.  TSort::StateBudgetExceeded is raised when the
+  # state budget is exceeded.
+  #
+  #   graph = G.new({1=>[], 2=>[], 3=>[]})
+  #   p graph.linear_extension_unrank(3) #=> [2, 3, 1]
+  #
+  def linear_extension_unrank(rank, state_budget: DEFAULT_STATE_BUDGET)
+    each_node = method(:tsort_each_node)
+    each_child = method(:tsort_each_child)
+    TSort.linear_extension_unrank(rank, each_node, each_child, state_budget: state_budget)
+  end
+
+  # The class-method version of #linear_extension_unrank.
+  # The graph is represented by _each_node_ and _each_child_.
+  def self.linear_extension_unrank(rank, each_node, each_child, state_budget: DEFAULT_STATE_BUDGET)
+    counter = LinearExtensionCounter.new(each_node, each_child, state_budget)
+    raise Cyclic.new("topological sort failed: the graph has a cycle") if counter.total.zero?
+    counter.unrank(rank)
+  end
+
+  # Returns a linear extension (a valid execution order, from children to
+  # parents) sampled uniformly at random from all linear extensions of
+  # the graph.  Unlike greedily picking a random zero-indegree node at
+  # each step -- which is biased because different prefixes leave
+  # different numbers of completions -- this samples each linear
+  # extension with exactly equal probability, using exact counts.
+  #
+  # _random_ is the random number generator to use, responding to
+  # #rand like Random and Random::Formatter-compatible objects.
+  #
+  # TSort::Cyclic is raised if the graph has a cycle.
+  # TSort::StateBudgetExceeded is raised when the state budget is
+  # exceeded.
+  #
+  #   graph = G.new({1=>[2, 3], 2=>[4], 3=>[4], 4=>[]})
+  #   p graph.linear_extension_sample(random: Random.new(42))
+  #   #=> [4, 2, 3, 1] or [4, 3, 2, 1], each with probability 1/2
+  #
+  def linear_extension_sample(random: Random.new, state_budget: DEFAULT_STATE_BUDGET)
+    each_node = method(:tsort_each_node)
+    each_child = method(:tsort_each_child)
+    TSort.linear_extension_sample(each_node, each_child, random: random, state_budget: state_budget)
+  end
+
+  # The class-method version of #linear_extension_sample.
+  # The graph is represented by _each_node_ and _each_child_.
+  def self.linear_extension_sample(each_node, each_child, random: Random.new, state_budget: DEFAULT_STATE_BUDGET)
+    counter = LinearExtensionCounter.new(each_node, each_child, state_budget)
+    raise Cyclic.new("topological sort failed: the graph has a cycle") if counter.total.zero?
+    counter.sample(random)
+  end
+
+  # Counts linear extensions of a directed acyclic graph by dynamic
+  # programming over subsets of nodes, and derives ranking, unranking and
+  # uniform sampling from the exact counts.  A state is the bitmask of
+  # nodes already placed (executed); a node can be placed once all of its
+  # children are placed.  All arithmetic uses Ruby Integers, so counts
+  # are exact bignums.
+  class LinearExtensionCounter # :nodoc:
+    def initialize(each_node, each_child, state_budget)
+      @state_budget = state_budget
+      @nodes = []
+      each_node.call {|node| @nodes << node }
+      @index = {}
+      @nodes.each_with_index {|node, i| @index[node] = i }
+      size = @nodes.size
+      @prereq = Array.new(size, 0)
+      @nodes.each_with_index do |node, i|
+        each_child.call(node) do |child|
+          child_index = @index[child]
+          raise ArgumentError, "child node not in graph: #{child.inspect}" unless child_index
+          @prereq[i] |= 1 << child_index
+        end
+      end
+      @full = (1 << size) - 1
+      @memo = {}
+      @state_count = 0
+    end
+
+    # Number of subset states explored so far.
+    attr_reader :state_count
+
+    def total
+      count(0)
+    end
+
+    def rank(order)
+      nodes = order.to_a
+      unless nodes.size == @nodes.size
+        raise ArgumentError, "not a permutation of the graph nodes: #{order.inspect}"
+      end
+      done = 0
+      rank = 0
+      nodes.each do |node|
+        i = @index[node]
+        raise ArgumentError, "unknown node in order: #{node.inspect}" unless i
+        bit = 1 << i
+        unless (done & bit).zero? && (@prereq[i] & ~done).zero?
+          raise ArgumentError, "not a valid linear extension: #{order.inspect}"
+        end
+        each_available(done) do |j, jbit|
+          break if j >= i
+          rank += count(done | jbit)
+        end
+        done |= bit
+      end
+      rank
+    end
+
+    def unrank(rank)
+      total = self.total
+      unless rank.is_a?(Integer) && 0 <= rank && rank < total
+        raise ArgumentError, "rank out of range 0...#{total}: #{rank.inspect}"
+      end
+      done = 0
+      order = []
+      until done == @full
+        each_available(done) do |i, bit|
+          c = count(done | bit)
+          if rank < c
+            order << @nodes[i]
+            done |= bit
+            break
+          end
+          rank -= c
+        end
+      end
+      order
+    end
+
+    def sample(random)
+      done = 0
+      order = []
+      until done == @full
+        r = random.rand(count(done))
+        each_available(done) do |i, bit|
+          c = count(done | bit)
+          if r < c
+            order << @nodes[i]
+            done |= bit
+            break
+          end
+          r -= c
+        end
+      end
+      order
+    end
+
+    private
+
+    def count(done)
+      return 1 if done == @full
+      return @memo[done] if @memo.key?(done)
+      @state_count += 1
+      if @state_count > @state_budget
+        raise StateBudgetExceeded,
+          "state budget exceeded: more than #{@state_budget} subset states"
+      end
+      sum = 0
+      each_available(done) {|_i, bit| sum += count(done | bit) }
+      @memo[done] = sum
+    end
+
+    def each_available(done)
+      i = 0
+      size = @nodes.size
+      while i < size
+        bit = 1 << i
+        yield i, bit if (done & bit).zero? && (@prereq[i] & ~done).zero?
+        i += 1
+      end
+    end
+  end
+  private_constant :LinearExtensionCounter
 
   # Should be implemented by a extended class.
   #

@@ -60,6 +60,38 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+### Counting, ranking and sampling linear extensions
+
+For small graphs, TSort can count the valid execution orders (linear
+extensions) exactly, convert between an order and its rank, and sample
+an order uniformly at random.  Sampling is done via exact counts, so
+every linear extension is equally likely -- unlike greedily picking a
+random zero-indegree node at each step, which is biased because
+different prefixes leave different numbers of completions.
+
+```ruby
+graph = {1=>[2, 3], 2=>[4], 3=>[4], 4=>[]} # a diamond
+
+graph.linear_extension_count            #=> 2
+graph.linear_extension_unrank(1)        #=> [4, 3, 2, 1]
+graph.linear_extension_rank([4, 3, 2, 1]) #=> 1
+graph.linear_extension_sample(random: Random.new(42))
+#=> [4, 2, 3, 1] or [4, 3, 2, 1], each with probability 1/2
+```
+
+Counts are exact Ruby Integers (bignums when large).  The computation
+uses dynamic programming over subsets of nodes, so a graph of n nodes
+may need up to 2**n states.  The number of states explored is limited
+by a configurable budget (default `TSort::DEFAULT_STATE_BUDGET`);
+`TSort::StateBudgetExceeded` is raised when it is exceeded:
+
+```ruby
+graph.linear_extension_count(state_budget: 1000)
+```
+
+Each method also has a class-method form taking `each_node` and
+`each_child` callables, like `TSort.tsort`.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
