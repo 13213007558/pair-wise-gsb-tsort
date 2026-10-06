@@ -237,6 +237,206 @@ module TSort
     }
   end
 
+  # Returns a minimum chain cover of the directed acyclic graph together with
+  # a maximum antichain of the same size, by Dilworth's theorem.
+  #
+  # A chain is ordered from child to parent, as in #tsort. Consecutive nodes
+  # in a chain only need to be comparable, so they may be connected by an
+  # indirect path. Each such witness path is included in the +paths+ entry for
+  # the chain. A witness path may contain nodes belonging to another chain.
+  #
+  # The result has the following keys:
+  #
+  # * +:chains+ - an array of chains. Each chain is a hash with +:nodes+ and
+  #   +:paths+. Every graph node occurs in exactly one +:nodes+ array.
+  # * +:antichain+ - a maximum set of pairwise incomparable nodes.
+  # * +:size+ - the number of chains, which equals the antichain size.
+  #
+  # The size describes structural parallelism in the partial order. It is not
+  # a guaranteed achievable thread count when execution has resource or other
+  # constraints.
+  #
+  # If there is a cycle, TSort::Cyclic is raised.
+  #
+  #   class G
+  #     include TSort
+  #     def initialize(g)
+  #       @g = g
+  #     end
+  #     def tsort_each_child(n, &b) @g[n].each(&b) end
+  #     def tsort_each_node(&b) @g.each_key(&b) end
+  #   end
+  #
+  #   graph = G.new(1=>[2, 3], 2=>[4], 3=>[4], 4=>[])
+  #   graph.minimum_chain_cover
+  #   #=> {:chains=>[{:nodes=>[4, 2, 1], :paths=>[[4, 2], [2, 1]]},
+  #          {:nodes=>[3], :paths=>[]}],
+  #       :antichain=>[2, 3],
+  #       :size=>2}
+  #
+  def minimum_chain_cover
+    each_node = method(:tsort_each_node)
+    each_child = method(:tsort_each_child)
+    TSort.minimum_chain_cover(each_node, each_child)
+  end
+
+  # Returns a minimum chain cover for the graph represented by _each_node_ and
+  # _each_child_. See #minimum_chain_cover for the result shape.
+  #
+  # _each_node_ should have a +call+ method which yields each node in the
+  # graph. _each_child_ should have a +call+ method which takes a node and
+  # yields each direct child node.
+  #
+  # If there is a cycle, TSort::Cyclic is raised.
+  #
+  def self.minimum_chain_cover(each_node, each_child)
+    nodes = []
+    node_ids = {}
+    direct_children = []
+    queue = []
+
+    add_node = lambda do |node|
+      unless node_ids.include?(node)
+        id = nodes.length
+        node_ids[node] = id
+        nodes << node
+        direct_children << []
+        queue << id
+      end
+      node_ids[node]
+    end
+
+    each_node.call {|node| add_node.call(node) }
+
+    until queue.empty?
+      id = queue.shift
+      node = nodes[id]
+      each_child.call(node) do |child|
+        child_id = add_node.call(child)
+        direct_children[id] << child_id
+      end
+    end
+
+    node_count = nodes.length
+    return {chains: [], antichain: [], size: 0} if node_count.zero?
+
+    indegree = Array.new(node_count, 0)
+    direct_children.each do |children|
+      children.each {|child_id| indegree[child_id] += 1 }
+    end
+
+    topological_order = []
+    ready = []
+    indegree.each_with_index do |degree, id|
+      ready << id if degree.zero?
+    end
+
+    until ready.empty?
+      id = ready.pop
+      topological_order << id
+      direct_children[id].each do |child_id|
+        indegree[child_id] -= 1
+        ready << child_id if indegree[child_id].zero?
+      end
+    end
+
+    unless topological_order.length == node_count
+      raise Cyclic.new("minimum chain cover failed: graph is not acyclic")
+    end
+
+    reachable = Array.new(node_count, 0)
+    topological_order.reverse_each do |id|
+      direct_children[id].each do |child_id|
+        reachable[id] |= (1 << child_id) | reachable[child_id]
+      end
+    end
+
+    matched_right = Array.new(node_count)
+    matched_left = Array.new(node_count)
+
+    augment = lambda do |left_id, visited_right|
+      node_count.times do |right_id|
+        next unless reachable[left_id][right_id] == 1
+        next unless visited_right[right_id].nil?
+        visited_right[right_id] = true
+
+        if matched_right[right_id].nil? ||
+           augment.call(matched_right[right_id], visited_right)
+          matched_right[right_id] = left_id
+          matched_left[left_id] = right_id
+          return true
+        end
+      end
+      false
+    end
+
+    node_count.times do |left_id|
+      augment.call(left_id, {})
+    end
+
+    reachable_left = Array.new(node_count, false)
+    reachable_right = Array.new(node_count, false)
+    alternating_queue = []
+
+    node_count.times do |id|
+      if matched_left[id].nil?
+        reachable_left[id] = true
+        alternating_queue << id
+      end
+    end
+
+    until alternating_queue.empty?
+      left_id = alternating_queue.shift
+      node_count.times do |right_id|
+        next unless reachable[left_id][right_id] == 1
+        next if right_id == matched_left[left_id]
+        next if reachable_right[right_id]
+
+        reachable_right[right_id] = true
+        next_left_id = matched_right[right_id]
+        if next_left_id && !reachable_left[next_left_id]
+          reachable_left[next_left_id] = true
+          alternating_queue << next_left_id
+        end
+      end
+    end
+
+    antichain_ids = node_count.times.select do |id|
+      reachable_left[id] && !reachable_right[id]
+    end
+
+    has_predecessor = Array.new(node_count, false)
+    matched_right.each_with_index do |left_id, right_id|
+      has_predecessor[right_id] = true if left_id
+    end
+
+    chain_ids = node_count.times.reject {|id| has_predecessor[id]}.map do |head_id|
+      chain = []
+      id = head_id
+      while id
+        chain << id
+        id = matched_left[id]
+      end
+      chain
+    end
+
+    chains = chain_ids.map do |forward_chain|
+      {
+        nodes: forward_chain.reverse.map {|id| nodes[id]},
+        paths: forward_chain.reverse.each_cons(2).map do |child_id, parent_id|
+          chain_path(parent_id, child_id, direct_children)
+                    .map {|id| nodes[id]}
+        end
+      }
+    end
+
+    {
+      chains: chains,
+      antichain: antichain_ids.map {|id| nodes[id]},
+      size: chains.length
+    }
+  end
+
   # Returns strongly connected components as an array of arrays of nodes.
   # The array is sorted from children to parents.
   # Each elements of the array represents a strongly connected component.
@@ -438,6 +638,31 @@ module TSort
 
     minimum_id
   end
+
+  def self.chain_path(parent_id, child_id, direct_children)
+    parents = {parent_id => nil}
+    queue = [parent_id]
+
+    until queue.empty?
+      id = queue.shift
+      direct_children[id].each do |candidate_id|
+        next if parents.include?(candidate_id)
+
+        parents[candidate_id] = id
+        if candidate_id == child_id
+          path = []
+          current_id = child_id
+          while current_id
+            path << current_id
+            current_id = parents[current_id]
+          end
+          return path
+        end
+        queue << candidate_id
+      end
+    end
+  end
+  private_class_method :chain_path
 
   # Should be implemented by a extended class.
   #

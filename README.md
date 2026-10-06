@@ -60,6 +60,35 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+## Minimum chain cover
+
+For a directed acyclic graph, `minimum_chain_cover` treats reachability as the
+partial order and returns a minimum partition into chains, together with a
+maximum antichain of the same size (Dilworth's theorem). Each node belongs to
+exactly one chain. Consecutive chain nodes may be connected indirectly, and
+the corresponding witness path is included:
+
+```ruby
+class DependencyGraph < Hash
+  include TSort
+  alias tsort_each_node each_key
+  def tsort_each_child(node, &block)
+    fetch(node).each(&block)
+  end
+end
+
+graph = DependencyGraph[1=>[2], 2=>[3], 3=>[4, 5], 4=>[], 5=>[]]
+graph.minimum_chain_cover
+# {:chains=>[{:nodes=>[4, 3, 2, 1], :paths=>[[4, 3], [3, 2], [2, 1]]},
+#           {:nodes=>[5], :paths=>[]}],
+#  :antichain=>[4, 5],
+#  :size=>2}
+```
+
+The size describes structural parallelism in the dependency partial order.
+It is not a promise that that many threads can be achieved when resource or
+other execution constraints apply.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
