@@ -439,6 +439,243 @@ module TSort
     minimum_id
   end
 
+  # Iterates over each elementary directed cycle in the graph.
+  #
+  # An elementary cycle is an array of nodes in which each node of the
+  # cycle occurs exactly once; consecutive nodes are joined by an edge and
+  # the last node points back to the first.  Self-loops are reported as
+  # one-element cycles.
+  #
+  # Rotations of the same cycle are not distinguished: a cycle is yielded
+  # exactly once, starting with the node that is enumerated first by
+  # #tsort_each_node among the nodes of the cycle.  Reversing an edge is
+  # distinguished, so +[1, 2]+ (an edge from 1 to 2 and an edge from 2 to
+  # 1) and a reversed traversal of a longer cycle are different results
+  # when the respective edges exist.
+  #
+  # Unless #tsort_each_child yields a node more than once, the order of
+  # yielded cycles is deterministic: cycles starting at an earlier node
+  # come first, and cycles with the same starting node are yielded in the
+  # depth-first order induced by the order of #tsort_each_child.
+  #
+  # If _unique_ is +true+ (the default), parallel edges are collapsed as
+  # the caller of #tsort_each_child chooses: a cycle is reported once even
+  # if the same node is yielded several times as a child.  If _unique_ is
+  # +false+, parallel edges keep their identity: a cycle using each of the
+  # parallel edges is reported separately, in the order in which the child
+  # nodes are yielded.
+  #
+  # The result is enumerated lazily: cycles are yielded as they are found,
+  # without enumerating all cycles first.  Without a block, an Enumerator
+  # is returned, so taking only the first few cycles does not enumerate
+  # the rest.
+  #
+  #   class G
+  #     include TSort
+  #     def initialize(g)
+  #       @g = g
+  #     end
+  #     def tsort_each_child(n, &b) @g[n].each(&b) end
+  #     def tsort_each_node(&b) @g.each_key(&b) end
+  #   end
+  #
+  #   graph = G.new({1=>[2], 2=>[3], 3=>[1, 2], 4=>[]})
+  #   graph.each_cycle.to_a #=> [[1, 2, 3], [2, 3]]
+  #
+  def each_cycle(unique: true, &block) # :yields: cycle
+    each_node = method(:tsort_each_node)
+    each_child = method(:tsort_each_child)
+    TSort.each_cycle(each_node, each_child, unique: unique, &block)
+  end
+
+  # The iterator version of the #each_cycle method for a graph represented
+  # by _each_node_ and _each_child_.
+  # _each_node_ should have a +call+ method which yields for each node in the graph.
+  # _each_child_ should have a +call+ method which takes a node argument
+  # and yields for each child node.
+  #
+  # See #each_cycle for the meaning of _unique_ and of the yielded cycles.
+  #
+  #   g = {1=>[2], 2=>[3], 3=>[1, 2], 4=>[]}
+  #   each_node = lambda {|&b| g.each_key(&b) }
+  #   each_child = lambda {|n, &b| g[n].each(&b) }
+  #   TSort.each_cycle(each_node, each_child).to_a #=> [[1, 2, 3], [2, 3]]
+  #
+  def self.each_cycle(each_node, each_child, unique: true) # :yields: cycle
+    return to_enum(__method__, each_node, each_child, unique: unique) unless block_given?
+
+    # Fix the node ordering first, so the output order does not depend on
+    # the (possibly destructive or lazy) enumeration of the caller later.
+    nodes = []
+    node_index = {}
+    each_node.call {|node|
+      unless node_index.key?(node)
+        node_index[node] = nodes.length
+        nodes << node
+      end
+    }
+
+    # Each elementary cycle has a unique node with the smallest index.  At
+    # step +start_index+ only the subgraph induced by nodes with an index
+    # not smaller than +start_index+ is searched, so every cycle is found
+    # exactly once, with its smallest-indexed node first.
+    nodes.each_with_index {|start_node, start_index|
+      restricted_child = lambda {|node, &yielder|
+        each_child.call(node) {|child|
+          index = node_index.key?(child) ? node_index[child] : nil
+          if index && index >= start_index
+            yielder.call(child)
+          end
+        }
+      }
+
+      component = nil
+      component_id_map = {}
+      TSort.each_strongly_connected_component_from(
+        start_node, restricted_child, component_id_map, []
+      ) {|scc|
+        if scc.include?(start_node)
+          component = scc
+        end
+      }
+      next unless component
+
+      # Johnson's least-vertex condition: if some vertex of the component
+      # is enumerated before the start vertex, every cycle in this
+      # component is (or was) handled with that earlier vertex as the
+      # start, so skip it here.  This also avoids re-scanning large
+      # components reachable from many acyclic predecessors.
+      skip = false
+      component.each {|node|
+        if node_index[node] < start_index
+          skip = true
+          break
+        end
+      }
+      next if skip
+
+      in_component = {}
+      component.each {|node| in_component[node] = true }
+
+      # Self-loops are one-node cycles.  They are reported before the
+      # length >= 2 cycles starting at the same node.  With _unique_ +false+
+      # each parallel self-loop edge is reported separately.
+      if unique
+        self_loop = false
+        each_child.call(start_node) {|child|
+          self_loop ||= child.eql?(start_node)
+        }
+        yield [start_node] if self_loop
+      else
+        each_child.call(start_node) {|child|
+          yield [start_node] if child.eql?(start_node)
+        }
+      end
+      next if component.length == 1
+
+      # Adjacency lists of the component, in the caller's order.  Self
+      # loops are excluded because they were already reported above.
+      # Materializing the lists also keeps the yielded order fixed even if
+      # the caller's graph changes during the iteration.
+      adjacency = {}
+      component.each {|node|
+        children = []
+        seen = {}
+        each_child.call(node) {|child|
+          next unless in_component.key?(child)
+          next if child.eql?(node)
+          if unique
+            next if seen.key?(child)
+            seen[child] = true
+          end
+          children << child
+        }
+        adjacency[node] = children
+      }
+
+      # Johnson, "Finding All the Elementary Circuits of a Directed
+      # Graph" (1975).  Reconsidering every node kept in +blocked+ after a
+      # dead end is essential: removing the start node can split a
+      # strongly connected component, and a node blocked for one cycle may
+      # still lead to another cycle.
+      blocked = {start_node => true}
+      waiting = {}
+
+      unblock = nil
+      unblock = lambda {|node|
+        blocked.delete(node)
+        dependents = waiting.delete(node)
+        if dependents
+          dependents.each {|dependent| unblock.call(dependent) if blocked.key?(dependent) }
+        end
+      }
+
+      path = [start_node]
+
+      circuit = nil
+      circuit = lambda {|node|
+        found_cycle = false
+        adjacency[node].each {|child|
+          if child.eql?(start_node)
+            yield path.dup
+            found_cycle = true
+          elsif !blocked.key?(child)
+            blocked[child] = true
+            path << child
+            if circuit.call(child)
+              found_cycle = true
+            end
+            path.pop
+          end
+        }
+        if found_cycle
+          unblock.call(node)
+        else
+          adjacency[node].each {|child|
+          (waiting[child] ||= []) << node if in_component.key?(child)
+          }
+        end
+        found_cycle
+      }
+      circuit.call(start_node)
+    }
+
+    nil
+  end
+
+  # Returns all elementary directed cycles as an array of arrays of nodes.
+  #
+  # Unlike #each_cycle, this builds the whole result eagerly.  See
+  # #each_cycle for the definition of a cycle and the meaning of _unique_.
+  #
+  #   class G
+  #     include TSort
+  #     def initialize(g)
+  #       @g = g
+  #     end
+  #     def tsort_each_child(n, &b) @g[n].each(&b) end
+  #     def tsort_each_node(&b) @g.each_key(&b) end
+  #   end
+  #
+  #   graph = G.new({1=>[2], 2=>[3], 3=>[1, 2], 4=>[]})
+  #   graph.cycles #=> [[1, 2, 3], [2, 3]]
+  #
+  def cycles(unique: true)
+    each_cycle(unique: unique).to_a
+  end
+
+  # Returns all elementary directed cycles of the graph represented by
+  # _each_node_ and _each_child_.  See TSort.each_cycle for details.
+  #
+  #   g = {1=>[2], 2=>[3], 3=>[1, 2], 4=>[]}
+  #   each_node = lambda {|&b| g.each_key(&b) }
+  #   each_child = lambda {|n, &b| g[n].each(&b) }
+  #   TSort.cycles(each_node, each_child) #=> [[1, 2, 3], [2, 3]]
+  #
+  def self.cycles(each_node, each_child, unique: true)
+    each_cycle(each_node, each_child, unique: unique).to_a
+  end
+
   # Should be implemented by a extended class.
   #
   # #tsort_each_node is used to iterate for all nodes over a graph.
