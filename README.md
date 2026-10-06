@@ -60,6 +60,34 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+## Incremental topological view
+
+Use `TSort::TopologicalView` when a long-running service changes one graph edge
+at a time and should not recompute a complete topological order. The initial
+order must already be topologically sorted.
+
+```ruby
+require 'tsort'
+
+view = TSort::TopologicalView.new([3, 2, 1, 4], 1 => [2, 3], 2 => [3])
+result = view.add_edge(4, 1)
+result.cyclic?          #=> false
+view.to_a               #=> [3, 2, 1, 4]
+result.checked_nodes    #=> [4]
+
+bad = view.add_edge(3, 4)
+bad.cyclic?             #=> true
+bad.cycle_path          #=> [3, 4, 1, 3]
+view.to_a               #=> [3, 2, 1, 4]
+```
+
+When an edge requires movement, nodes outside the old affected interval keep
+their position. Within that interval, the view repeatedly keeps the earliest
+old-order node whose interval children have already been emitted. Edge
+deletion and node deletion preserve the relative order of all surviving
+nodes. Every result records `checked_nodes`, the nodes whose adjacency was
+read by the local update.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
