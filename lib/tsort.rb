@@ -286,6 +286,98 @@ module TSort
     each_strongly_connected_component(each_node, each_child).to_a
   end
 
+  # Computes a minimum chain cover of a directed acyclic graph interpreted
+  # as a partial order. Nodes are comparable when one can reach the other,
+  # not only when they are connected by a direct edge.
+  #
+  # Returns a hash with:
+  #
+  # +:chains+:: an array of chains. Each node appears in exactly one chain,
+  #             and each chain is a hash with +:nodes+ and +:paths+. The
+  #             nodes are ordered from a node towards its reachable
+  #             descendants, following directed edges. +paths+ contains the
+  #             directed paths between consecutive nodes, so a one-node
+  #             chain has an empty paths array.
+  # +:maximum_antichain+:: an antichain whose size equals the number of
+  #                        chains, by Dilworth's theorem. Its nodes need not
+  #                        belong to the same topological level.
+  #
+  # If there is a cycle, TSort::Cyclic is raised.
+  #
+  # The number of chains is a structural upper bound on dependency-free
+  # parallel work. It does not account for task duration, scheduling,
+  # processor limits, I/O, or other resource constraints, so it should not
+  # be presented as a guaranteed achievable number of threads.
+  #
+  #   class G
+  #     include TSort
+  #     def initialize(g)
+  #       @g = g
+  #     end
+  #     def tsort_each_child(n, &b) @g[n].each(&b) end
+  #     def tsort_each_node(&b) @g.each_key(&b) end
+  #   end
+  #
+  #   graph = G.new({1=>[2], 2=>[], 3=>[4], 4=>[]})
+  #   result = graph.minimum_chain_cover
+  #   result[:chains].map {|chain| chain[:nodes] }
+  #   #=> [[1, 2], [3, 4]]
+  #
+  def minimum_chain_cover
+    each_node = method(:tsort_each_node)
+    each_child = method(:tsort_each_child)
+    TSort.minimum_chain_cover(each_node, each_child)
+  end
+
+  # Computes a minimum chain cover for the graph represented by
+  # _each_node_ and _each_child_. See #minimum_chain_cover for the return
+  # value and interpretation.
+  #
+  # _each_node_ should have a +call+ method which yields each node in the
+  # graph. _each_child_ should have a +call+ method which takes a node
+  # argument and yields each direct child of that node.
+  #
+  def self.minimum_chain_cover(each_node, each_child)
+    nodes = []
+    each_node.call {|node| nodes << node }
+    nodes.uniq!
+    canonical_node = {}
+    nodes.each {|node| canonical_node[node] = node }
+
+    filtered_each_child = lambda {|node, &block|
+      next unless canonical_node.key?(node)
+      each_child.call(node) {|child|
+        block.call(canonical_node[child]) if canonical_node.key?(child)
+      }
+    }
+    tsort_each(each_node, filtered_each_child).to_a
+
+    successors = {}
+    paths = {}
+    nodes.each {|node|
+      reachable, predecessors =
+        chain_cover_reachable(node, canonical_node, filtered_each_child)
+      successors[node] = reachable
+      paths[node] = predecessors
+    }
+
+    matched_target = {}
+    nodes.each {|source|
+      chain_cover_augment(source, successors, {}, matched_target)
+    }
+
+    matched_source = {}
+    matched_target.each {|target, source| matched_source[source] = target }
+
+    antichain = chain_cover_maximum_antichain(nodes, successors, matched_target)
+    chains = chain_cover_build_chains(nodes, matched_source, paths)
+
+    {
+      chains: chains,
+      maximum_antichain: antichain
+    }
+  end
+
   # The iterator version of the #strongly_connected_components method.
   # <tt><em>obj</em>.each_strongly_connected_component</tt> is similar to
   # <tt><em>obj</em>.strongly_connected_components.each</tt>, but
@@ -453,5 +545,129 @@ module TSort
   #
   def tsort_each_child(node) # :yields: child
     raise NotImplementedError.new
+  end
+
+  class << self
+    private
+
+    def chain_cover_reachable(source, node_set, each_child)
+      reachable = []
+      predecessors = {}
+      visited = {source => true}
+      queue = [source]
+      index = 0
+
+      while index < queue.length
+        node = queue[index]
+        index += 1
+        each_child.call(node) {|child|
+          next unless node_set.key?(child)
+          next if visited.key?(child)
+
+          visited[child] = true
+          predecessors[child] = node
+          reachable << child
+          queue << child
+        }
+      end
+
+      [reachable, predecessors]
+    end
+
+    def chain_cover_augment(source, successors, visited, matched_target)
+      successors[source].each {|target|
+        next if visited.key?(target)
+        visited[target] = true
+
+        previous = matched_target[target]
+        if previous.nil? || chain_cover_augment(previous, successors, visited, matched_target)
+          matched_target[target] = source
+          return true
+        end
+      }
+      false
+    end
+
+    def chain_cover_maximum_antichain(nodes, successors, matched_target)
+      reachable = {}
+      queue = []
+      matched_source = {}
+      matched_target.each {|target, source| matched_source[source] = true }
+      nodes.each {|node|
+        unless matched_source.key?(node)
+          key = [true, node]
+          reachable[key] = true
+          queue << key
+        end
+      }
+
+      index = 0
+      while index < queue.length
+        side, node = queue[index]
+        index += 1
+
+        if side
+          successors[node].each {|target|
+            next if matched_target[target].eql?(node)
+            key = [false, target]
+            next if reachable.key?(key)
+            reachable[key] = true
+            queue << key
+          }
+        else
+          source = matched_target[node]
+          next unless source
+          key = [true, source]
+          next if reachable.key?(key)
+          reachable[key] = true
+          queue << key
+        end
+      end
+
+      nodes.select {|node|
+        reachable.key?([true, node]) && !reachable.key?([false, node])
+      }
+    end
+
+    def chain_cover_build_chains(nodes, matched_source, paths)
+      next_node = {}
+      previous_node = {}
+      matched_source.each {|source, target|
+        next_node[source] = target
+        previous_node[target] = source
+      }
+
+      chains = []
+      nodes.each {|node|
+        next if previous_node.key?(node)
+
+        chain_nodes = []
+        chain_paths = []
+        current = node
+        while current
+          chain_nodes << current
+          following = next_node[current]
+          if following
+            chain_paths << chain_cover_path(current, following, paths)
+          end
+          current = following
+        end
+
+        chains << {nodes: chain_nodes, paths: chain_paths}
+      }
+      chains
+    end
+
+    def chain_cover_path(source, target, paths)
+      path = [target]
+      current = target
+      until current.eql?(source)
+        current = paths[source][current]
+        raise KeyError, "missing chain path from #{source.inspect}" unless current
+        path << current
+      end
+      path.reverse!
+      path
+    end
   end
 end

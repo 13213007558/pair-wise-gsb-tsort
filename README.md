@@ -60,6 +60,32 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+`minimum_chain_cover` treats a DAG as a partial order. It returns the minimum
+number of chains covering every node exactly once, a maximum antichain of the
+same size, and a directed path for every pair of consecutive nodes in a chain.
+Adjacent chain nodes may therefore be connected through intermediate nodes.
+
+```ruby
+class Graph < Hash
+  include TSort
+  alias tsort_each_node each_key
+  def tsort_each_child(node, &block)
+    fetch(node).each(&block)
+  end
+end
+
+graph = Graph[1=>[2], 2=>[3], 3=>[], 4=>[]]
+result = graph.minimum_chain_cover
+result[:chains].map { |chain| chain[:nodes] }
+#=> [[1, 2, 3], [4]]
+result[:maximum_antichain]
+#=> [3, 4]
+```
+
+The chain count describes only the graph's structural parallel space. It does
+not account for task duration, scheduling, processor limits, I/O, or other
+resource constraints, so it is not a guaranteed achievable thread count.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
