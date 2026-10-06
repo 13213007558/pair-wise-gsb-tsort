@@ -439,6 +439,160 @@ module TSort
     minimum_id
   end
 
+  # Returns all elementary cycles of the graph as an array of arrays of nodes.
+  #
+  # Each cycle is a list of nodes in which no node appears twice and every
+  # node is a child of its predecessor, the last node leading back to the
+  # first.  Cycles which differ only by a cyclic shift are reported once;
+  # reversing every edge of a cycle yields a different cycle.
+  #
+  #   class G
+  #     include TSort
+  #     def initialize(g)
+  #       @g = g
+  #     end
+  #     def tsort_each_child(n, &b) @g[n].each(&b) end
+  #     def tsort_each_node(&b) @g.each_key(&b) end
+  #   end
+  #
+  #   graph = G.new({1=>[2, 3], 2=>[1], 3=>[1]})
+  #   p graph.cycles #=> [[1, 2], [1, 3]]
+  #
+  def cycles(unique_edges: true)
+    each_cycle(unique_edges: unique_edges).to_a
+  end
+
+  # Returns all elementary cycles of the graph as an array of arrays of nodes.
+  #
+  # The graph is represented by _each_node_ and _each_child_.
+  # _each_node_ should have +call+ method which yields for each node in the graph.
+  # _each_child_ should have +call+ method which takes a node argument and yields for each child node.
+  #
+  #   g = {1=>[2, 3], 2=>[1], 3=>[1]}
+  #   each_node = lambda {|&b| g.each_key(&b) }
+  #   each_child = lambda {|n, &b| g[n].each(&b) }
+  #   p TSort.cycles(each_node, each_child) #=> [[1, 2], [1, 3]]
+  #
+  def self.cycles(each_node, each_child, unique_edges: true)
+    each_cycle(each_node, each_child, unique_edges: unique_edges).to_a
+  end
+
+  # The iterator version of the #cycles method.
+  # <tt><em>obj</em>.each_cycle</tt> is similar to
+  # <tt><em>obj</em>.cycles.each</tt>, but
+  # modification of _obj_ during the iteration may lead to unexpected results.
+  #
+  # #each_cycle returns an Enumerator if no block is given.
+  # The enumeration is lazy: cycles are searched only as they are requested,
+  # so taking the first few cycles does not enumerate the rest.
+  #
+  # If _unique_edges_ is true, multiple edges between the same pair of nodes
+  # are treated as a single edge.  If it is false, each edge keeps its
+  # identity and a cycle is yielded once for every combination of edges
+  # which forms it, so cycles with the same nodes may be yielded repeatedly.
+  #
+  #   class G
+  #     include TSort
+  #     def initialize(g)
+  #       @g = g
+  #     end
+  #     def tsort_each_child(n, &b) @g[n].each(&b) end
+  #     def tsort_each_node(&b) @g.each_key(&b) end
+  #   end
+  #
+  #   graph = G.new({1=>[2, 3], 2=>[1], 3=>[1]})
+  #   graph.each_cycle {|cycle| p cycle }
+  #   #=> [1, 2]
+  #   #   [1, 3]
+  #
+  def each_cycle(unique_edges: true, &block) # :yields: nodes
+    each_node = method(:tsort_each_node)
+    each_child = method(:tsort_each_child)
+    TSort.each_cycle(each_node, each_child, unique_edges: unique_edges, &block)
+  end
+
+  # The iterator version of the TSort.cycles method.
+  #
+  # The graph is represented by _each_node_ and _each_child_.
+  # _each_node_ should have +call+ method which yields for each node in the graph.
+  # _each_child_ should have +call+ method which takes a node argument and yields for each child node.
+  #
+  # TSort.each_cycle returns an Enumerator if no block is given.
+  # The enumeration is lazy: cycles are searched only as they are requested,
+  # so taking the first few cycles does not enumerate the rest.
+  #
+  # If _unique_edges_ is true, multiple edges between the same pair of nodes
+  # are treated as a single edge.  If it is false, each edge keeps its
+  # identity and a cycle is yielded once for every combination of edges
+  # which forms it, so cycles with the same nodes may be yielded repeatedly.
+  #
+  #   g = {1=>[2, 3], 2=>[1], 3=>[1]}
+  #   each_node = lambda {|&b| g.each_key(&b) }
+  #   each_child = lambda {|n, &b| g[n].each(&b) }
+  #   TSort.each_cycle(each_node, each_child) {|cycle| p cycle }
+  #   #=> [1, 2]
+  #   #   [1, 3]
+  #
+  def self.each_cycle(each_node, each_child, unique_edges: true) # :yields: nodes
+    return to_enum(__method__, each_node, each_child, unique_edges: unique_edges) unless block_given?
+
+    # Nodes are numbered in the order they are first seen:
+    # nodes from _each_node_ first, then children as they are discovered.
+    # Every elementary cycle is yielded exactly once, starting from its
+    # lowest-numbered node, so cyclic shifts of a cycle are not repeated.
+    index_of = {}
+    queue = []
+    intern = lambda {|node|
+      index = index_of[node]
+      unless index
+        index = index_of[node] = queue.length
+        queue << node
+      end
+      index
+    }
+    each_node.call {|node| intern.call(node) }
+
+    children_of = {}
+    each_child_of = lambda {|node|
+      children_of.fetch(node) do
+        children = []
+        seen = {} if unique_edges
+        each_child.call(node) {|child|
+          if unique_edges
+            next if seen[child]
+            seen[child] = true
+          end
+          children << child
+        }
+        children_of[node] = children
+      end
+    }
+
+    depth_first_search = nil
+    depth_first_search = lambda {|start_index, path, on_path|
+      each_child_of.call(path.last).each {|child|
+        child_index = intern.call(child)
+        next if child_index < start_index
+        if child_index == start_index
+          yield path.dup
+        elsif !on_path[child]
+          path << child
+          on_path[child] = true
+          depth_first_search.call(start_index, path, on_path)
+          on_path.delete(child)
+          path.pop
+        end
+      }
+    }
+
+    start_index = 0
+    while start_index < queue.length
+      depth_first_search.call(start_index, [queue[start_index]], {queue[start_index] => true})
+      start_index += 1
+    end
+    nil
+  end
+
   # Should be implemented by a extended class.
   #
   # #tsort_each_node is used to iterate for all nodes over a graph.
