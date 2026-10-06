@@ -60,6 +60,32 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+### Linear extensions
+
+For small graphs, TSort can also count, rank, unrank and uniformly
+sample *linear extensions* — the legal execution orders in which every
+node appears after all of its children (dependencies first):
+
+```ruby
+graph = {1=>[2, 3], 2=>[4], 3=>[4], 4=>[]}  # a diamond
+
+graph.linear_extension_count              #=> 2
+graph.linear_extension_unrank(0)          #=> [4, 2, 3, 1]
+graph.linear_extension_unrank(1)          #=> [4, 3, 2, 1]
+graph.linear_extension_rank([4, 3, 2, 1]) #=> 1
+graph.linear_extension_sample(random: Random.new(42))
+#=> [4, 2, 3, 1] or [4, 3, 2, 1], each with probability 1/2
+```
+
+The count is computed exactly with a dynamic program over node subsets
+and Ruby's arbitrary-precision Integers, and sampling draws a uniform
+rank and unranks it, so every legal order is equally likely (unlike
+repeatedly picking a random node with no remaining dependencies, which
+is biased).  The number of subset states is bounded by a budget
+(`TSort::DEFAULT_MAX_STATES`, overridable per call with `max_states:`);
+exceeding it raises `TSort::StateBudgetExceeded`, and cyclic graphs
+raise `TSort::Cyclic`.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
