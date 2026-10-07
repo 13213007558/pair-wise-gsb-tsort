@@ -60,6 +60,44 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+## Two-terminal series-parallel graphs
+
+`#two_terminal_series_parallel(source, sink)` recognizes a directed
+two-terminal series-parallel graph. Success returns a decomposition tree. The
+tree keeps the original edge identities in its leaves and can rebuild the graph.
+
+```ruby
+g = TSort::SeriesParallel::Graph.new(:s, :t)
+g.add_edge(:a, :s, :x)
+g.add_edge(:b, :x, :t)
+g.add_edge(:c, :s, :y)
+g.add_edge(:d, :y, :t)
+
+result = g.two_terminal_series_parallel(:s, :t)
+result.ok?                 #=> true
+result.decomposition.type  #=> :parallel
+result.decomposition.expand
+```
+
+Failure is also represented by a certificate. `residual` is the graph after
+all valid series and parallel reductions on source-to-sink paths, and `steps`
+rebuilds that residual graph. `diagnostics` lists isolated nodes, cyclic/back
+edges, terminal-boundary edges, and nodes or edges outside source-to-sink
+paths.
+
+```ruby
+g.add_edge(:cross, :x, :y)
+result = g.two_terminal_series_parallel(:s, :t)
+result.ok?                  #=> false
+result.residual.edges.keys
+result.replay == result.residual
+```
+
+Repeated children are treated as distinct parallel edges. A graph adapter can
+instead implement `tsort_each_edge(node)` and yield `(edge, child)` pairs to
+provide explicit edge identities. The class-method form accepts `each_node`,
+`each_child`, and an optional `each_edge` callable.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
