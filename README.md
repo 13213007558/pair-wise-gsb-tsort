@@ -60,6 +60,36 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+## Two-terminal series-parallel graphs
+
+Use `DirectedEdge` when parallel edges must retain separate identities.
+`series_parallel_decomposition(source, sink)` returns a decomposition tree on
+success; failures retain diagnostics, a residual graph, and a replayable
+certificate.
+
+```ruby
+require 'tsort'
+
+nodes = [:s, :a, :b, :t]
+edges = [
+  TSort::DirectedEdge.new(:s, :a, :sa),
+  TSort::DirectedEdge.new(:s, :b, :sb),
+  TSort::DirectedEdge.new(:a, :t, :at),
+  TSort::DirectedEdge.new(:b, :t, :bt)
+]
+graph = TSort::Graph.new(nodes, edges)
+
+result = graph.series_parallel_decomposition(:s, :t)
+result.ok?
+result.tree.expand
+
+graph.add_edge(TSort::DirectedEdge.new(:a, :b, :cross))
+failed = graph.series_parallel_decomposition(:s, :t)
+failed.ok?
+failed.residual_graph
+failed.verified?
+```
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
