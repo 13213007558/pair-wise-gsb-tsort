@@ -120,6 +120,11 @@
 # R. E. Tarjan, "Depth First Search and Linear Graph Algorithms",
 # <em>SIAM Journal on Computing</em>, Vol. 1, No. 2, pp. 146-160, June 1972.
 #
+# N. G. de Bruijn and T. van Aardenne-Ehrenfest,
+# "Circuit theory and the BEST theorem" and W. T. Tutte and C. A. B. Smith,
+# "On Unicursal Paths in a Network of Degree 4", for directed Eulerian
+# circuit counts.
+#
 
 module TSort
 
@@ -129,6 +134,9 @@ module TSort
   # Exception class to be raised when a cycle is found.
   class Cyclic < StandardError
   end
+
+  UNDEFINED = Object.new.freeze
+  private_constant :UNDEFINED
 
   # Returns a topologically sorted array of nodes.
   # The array is sorted from children to parents, i.e.
@@ -439,6 +447,152 @@ module TSort
     minimum_id
   end
 
+  # Counts directed Eulerian circuits in a directed multigraph.
+  #
+  # The result counts edge orders with fixed starting vertex _start_ and
+  # fixed first edge _first_edge_. Parallel edges are distinct, so
+  # _tsort_each_edge_ yields an edge ID together with its destination:
+  #
+  #   def tsort_each_edge(node)
+  #     @edges[node].each {|edge_id, destination| yield(edge_id, destination) }
+  #   end
+  #
+  # Edge IDs must be unique in the whole graph.
+  #
+  # If the returned count is +c+ and the graph has +m+ edges, the related
+  # conventions are:
+  #
+  # * fixed start, arbitrary first edge: outdegree(_start_) * +c+
+  # * cyclic circuits, where rotations are the same circuit: +c+
+  # * linear edge sequences with neither start nor first edge fixed: +m+ * +c+
+  #
+  # A graph with no vertices returns 0. A graph containing one isolated
+  # vertex and no edges returns 1 for the trivial empty circuit when no
+  # first edge is supplied. A zero-edge graph with more than one vertex
+  # returns 0. Non-Eulerian graphs return 0; malformed edge descriptions
+  # raise ArgumentError.
+  #
+  # The count is computed with the directed matrix-tree theorem and the
+  # BEST theorem as a large Integer; Eulerian circuits are not enumerated.
+  def directed_eulerian_circuit_count(start = UNDEFINED, first_edge = UNDEFINED)
+    TSort.directed_eulerian_circuit_count(
+      method(:tsort_each_node),
+      method(:tsort_each_edge),
+      start,
+      first_edge
+    )
+  end
+
+  # Works as #directed_eulerian_circuit_count, but the graph is represented
+  # by callables. _each_node_ yields all vertices and _each_edge_ yields
+  # +edge_id, destination+ pairs for every edge leaving a vertex.
+  def self.directed_eulerian_circuit_count(each_node, each_edge,
+                                           start = UNDEFINED,
+                                           first_edge = UNDEFINED)
+    nodes = []
+    known_nodes = {}
+    out_neighbors = {}
+    in_neighbors = {}
+    out_degree = {}
+    in_degree = {}
+
+    each_node.call {|node|
+      next if known_nodes.key?(node)
+      known_nodes[node] = true
+      nodes << node
+      out_neighbors[node] = []
+      in_neighbors[node] = []
+      out_degree[node] = 0
+      in_degree[node] = 0
+    }
+
+    return 0 if nodes.empty?
+
+    unless start.equal?(UNDEFINED) || known_nodes.key?(start)
+      raise ArgumentError, "unknown start node: #{start.inspect}"
+    end
+
+    edge_source = {}
+    nodes.each {|source|
+      each_edge.call(source) {|edge, destination|
+        if edge_source.key?(edge)
+          raise ArgumentError, "duplicate edge ID: #{edge.inspect}"
+        end
+        unless known_nodes.key?(destination)
+          raise ArgumentError, "edge #{edge.inspect} ends at unknown node: #{destination.inspect}"
+        end
+
+        edge_source[edge] = source
+        out_neighbors[source] << destination
+        in_neighbors[destination] << source
+        out_degree[source] += 1
+        in_degree[destination] += 1
+      }
+    }
+
+    edge_count = out_degree.values.inject(0, :+)
+
+    if edge_count.zero?
+      unless first_edge.equal?(UNDEFINED)
+        raise ArgumentError, "unknown first edge: #{first_edge.inspect}"
+      end
+      return nodes.size == 1 && (start.equal?(UNDEFINED) || nodes.first.eql?(start)) ? 1 : 0
+    end
+
+    if start.equal?(UNDEFINED)
+      raise ArgumentError, "a start node is required when the graph has edges"
+    end
+    if first_edge.equal?(UNDEFINED)
+      raise ArgumentError, "a first edge is required when the graph has edges"
+    end
+    unless edge_source.key?(first_edge)
+      raise ArgumentError, "unknown first edge: #{first_edge.inspect}"
+    end
+    unless edge_source[first_edge].eql?(start)
+      raise ArgumentError, "first edge #{first_edge.inspect} does not leave #{start.inspect}"
+    end
+
+    return 0 unless nodes.all? {|node| out_degree[node] == in_degree[node]}
+
+    active_nodes = nodes.select {|node|
+      out_degree[node] > 0 || in_degree[node] > 0
+    }
+    return 0 unless out_degree[start] > 0
+    return 0 unless directed_eulerian_reachable?(
+      start, out_neighbors, active_nodes
+    )
+    return 0 unless directed_eulerian_reachable?(
+      start, in_neighbors, active_nodes
+    )
+
+    indexed_nodes = active_nodes.reject {|node| node.eql?(start) }
+    index = {}
+    indexed_nodes.each_with_index {|node, i| index[node] = i }
+    size = indexed_nodes.size
+    laplacian = Array.new(size) {Array.new(size, 0)}
+
+    nodes.each {|source|
+      out_neighbors[source].each {|destination|
+        destination_index = index[destination]
+        source_index = index[source]
+        laplacian[destination_index][destination_index] += 1 if destination_index
+        if source_index && destination_index
+          laplacian[source_index][destination_index] -= 1
+        end
+      }
+    }
+
+    rooted_tree_count = integer_determinant(laplacian)
+    return 0 if rooted_tree_count.zero?
+
+    permutation_factor = 1
+    active_nodes.each {|node|
+      1.upto(out_degree[node] - 1) {|i| permutation_factor *= i }
+    }
+
+    rooted_tree_count * permutation_factor
+  end
+
   # Should be implemented by a extended class.
   #
   # #tsort_each_node is used to iterate for all nodes over a graph.
@@ -454,4 +608,59 @@ module TSort
   def tsort_each_child(node) # :yields: child
     raise NotImplementedError.new
   end
+
+  # Should be implemented by an extended class when counting directed
+  # Eulerian circuits. It yields +edge_id, destination+ for every edge
+  # leaving _node_.
+  def tsort_each_edge(node) # :yields: edge_id, destination
+    raise NotImplementedError.new
+  end
+
+  def self.directed_eulerian_reachable?(start, neighbors, targets)
+    seen = {start => true}
+    stack = [start]
+
+    until stack.empty?
+      node = stack.pop
+      neighbors[node].each {|neighbor|
+        next if seen.key?(neighbor)
+        seen[neighbor] = true
+        stack << neighbor
+      }
+    end
+
+    targets.all? {|node| seen.key?(node) }
+  end
+  private_class_method :directed_eulerian_reachable?
+
+  def self.integer_determinant(matrix)
+    n = matrix.size
+    return 1 if n.zero?
+
+    a = matrix.map(&:dup)
+    sign = 1
+    previous_pivot = 1
+
+    (0...n - 1).each {|k|
+      pivot_row = (k...n).find {|i| a[i][k] != 0 }
+      return 0 unless pivot_row
+
+      if pivot_row != k
+        a[k], a[pivot_row] = a[pivot_row], a[k]
+        sign = -sign
+      end
+
+      pivot = a[k][k]
+      (k + 1...n).each {|i|
+        (k + 1...n).each {|j|
+          a[i][j] =
+            (a[i][j] * pivot - a[i][k] * a[k][j]) / previous_pivot
+        }
+      }
+      previous_pivot = pivot
+    }
+
+    sign * a[n - 1][n - 1]
+  end
+  private_class_method :integer_determinant
 end

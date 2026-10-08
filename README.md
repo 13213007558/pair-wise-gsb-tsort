@@ -60,6 +60,56 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+## Directed Eulerian circuits
+
+To count circuits in a directed multigraph, provide an edge iterator in
+addition to the node iterator. Each edge has an independent ID, so parallel
+edges are counted as distinct choices:
+
+```ruby
+require 'tsort'
+
+class DirectedGraph
+  include TSort
+
+  def initialize(nodes, edges)
+    @nodes = nodes
+    @edges = Hash.new { |hash, node| hash[node] = [] }
+    edges.each { |edge_id, source, destination|
+      @edges[source] << [edge_id, destination]
+    }
+  end
+
+  def tsort_each_node(&block)
+    @nodes.each(&block)
+  end
+
+  def tsort_each_edge(node, &block)
+    @edges.fetch(node, []).each(&block)
+  end
+end
+
+edges = [[:a, 1, 2], [:b, 2, 1]]
+graph = DirectedGraph.new([1, 2], edges)
+
+# Fixed start 1 and fixed first edge :a.
+graph.directed_eulerian_circuit_count(1, :a) #=> 1
+```
+
+For an Eulerian graph with `m` edges, let `c` be the returned count.
+
+* Fixed start, any first edge: `outdegree(start) * c`.
+* Cyclic circuits, with rotations identified: `c`.
+* Linear edge sequences without a fixed start or first edge: `m * c`.
+
+An empty graph with no vertices returns `0`. One isolated vertex with no
+edges returns `1` for the trivial empty circuit. A zero-edge graph with more
+than one vertex returns `0`.
+
+The method checks balanced in/out degrees and strong connectivity among
+edge-bearing vertices, then uses the directed matrix-tree theorem and BEST
+theorem. It returns a large `Integer` without enumerating all circuits.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
