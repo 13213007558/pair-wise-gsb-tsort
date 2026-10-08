@@ -455,3 +455,5 @@ module TSort
     raise NotImplementedError.new
   end
 end
+
+require_relative "tsort/network_reliability"

@@ -15,6 +15,23 @@ TSort requires two methods to interpret an object as a graph,
 The equality of nodes are defined by eql? and hash since
 TSort uses Hash internally.
 
+## Network reliability
+
+`TSort::NetworkReliability` calculates the probability that a directed source
+can reach a target when every edge has an independent survival probability.
+It memoizes shared reachability states rather than enumerating a copy of the
+graph for every edge-state combination. `state_count` reports the number of
+nonterminal shared states.
+
+```ruby
+edges = [[:s, :a], [:s, :b], [:a, :t], [:b, :t]]
+reliability = TSort::NetworkReliability.new(edges, :s, :t)
+
+reliability.probability([0.9, 0.8, 0.7, 0.6])
+reliability.polynomial # integer coefficients when every edge uses p
+reliability.state_count
+```
+
 ## Installation
 
 Add this line to your application's Gemfile:
