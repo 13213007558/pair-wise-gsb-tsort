@@ -454,4 +454,182 @@ module TSort
   def tsort_each_child(node) # :yields: child
     raise NotImplementedError.new
   end
+
+  # Counts Eulerian circuits of a directed multigraph, i.e. the number of
+  # distinct orders in which the edges can be traversed so that consecutive
+  # edges connect head-to-tail and the last edge returns to the first edge's
+  # tail.
+  #
+  # The graph is given as _nodes_, an enumerable of arbitrary node objects,
+  # and _edges_, an enumerable of <tt>[tail, head]</tt> pairs.  Parallel
+  # edges (several edges between the same ordered pair of nodes) and loops
+  # (edges whose tail equals their head) are allowed; every element of
+  # _edges_ is treated as an independent edge with its own identity, so
+  # traversals that use the same endpoints in a different assignment of
+  # parallel edges are counted separately.
+  #
+  # == Counting convention
+  #
+  # The start node is fixed to _start_ and the first traversed edge is fixed
+  # to the edge at index _first_edge_ of _edges_ (which must leave _start_).
+  # Two traversals are considered the same iff they visit the same sequence
+  # of edge indices.  The result is a (possibly huge) Integer computed
+  # exactly with the BEST theorem; the circuits are never enumerated.
+  #
+  #   TSort.count_eulerian_circuits([1, 2], [[1, 2], [2, 1]], start: 1)
+  #   #=> 1
+  #
+  #   # two parallel edges a->b and two parallel edges b->a
+  #   TSort.count_eulerian_circuits([:a, :b],
+  #                                 [[:a, :b], [:a, :b], [:b, :a], [:b, :a]],
+  #                                 start: :a)
+  #   #=> 2
+  #
+  # == Conversion to other conventions
+  #
+  # Let N be the returned value, m the number of edges and
+  # outdeg(start) the out-degree of _start_:
+  #
+  # * Edge sequences starting at _start_ with any first edge:
+  #   <tt>N * outdeg(start)</tt>.
+  # * Cyclic edge orders (circuits up to rotation, start forgotten): N --
+  #   every rotation class contains exactly outdeg(start) sequences that
+  #   begin at _start_, one per outgoing edge of _start_.
+  # * Linear edge sequences with any start and any first edge:
+  #   <tt>N * m</tt> when the graph has a single non-trivial weakly
+  #   connected component (every node with an incident edge can start a
+  #   circuit then).
+  #
+  # == Degenerate cases
+  #
+  # * An empty graph (no edges) has exactly one circuit -- the empty one --
+  #   provided _start_ is a declared node, so the result is 1.  If _start_
+  #   is not among _nodes_, the result is 0.
+  # * A single isolated node (with or without further isolated nodes)
+  #   likewise yields 1.
+  # * Isolated nodes besides _start_ never affect the count.
+  #
+  # Otherwise the result is 0 unless every node satisfies
+  # in-degree == out-degree and every edge belongs to a single weakly
+  # connected component.
+  #
+  # Raises ArgumentError if _first_edge_ is out of range or does not leave
+  # _start_.
+  def self.count_eulerian_circuits(nodes, edges, start:, first_edge: 0)
+    edges = edges.to_a
+    m = edges.size
+
+    if m.zero?
+      raise ArgumentError, "first_edge is out of range for an empty edge list" if first_edge != 0
+      return nodes.include?(start) ? 1 : 0
+    end
+
+    unless 0 <= first_edge && first_edge < m
+      raise ArgumentError, "first_edge #{first_edge} is out of range (0...#{m})"
+    end
+    unless edges[first_edge][0] == start
+      raise ArgumentError, "edge #{first_edge} does not start at #{start.inspect}"
+    end
+
+    index = {}
+    nodes.each {|n| index[n] = index.size unless index.key?(n) }
+    edges.each {|u, v|
+      index[u] = index.size unless index.key?(u)
+      index[v] = index.size unless index.key?(v)
+    }
+    n = index.size
+    s = index[start]
+
+    outdeg = Array.new(n, 0)
+    indeg = Array.new(n, 0)
+    multiplicity = Array.new(n) { Array.new(n, 0) }
+    edges.each {|u, v|
+      i = index[u]
+      j = index[v]
+      outdeg[i] += 1
+      indeg[j] += 1
+      multiplicity[i][j] += 1
+    }
+    n.times {|i| return 0 if outdeg[i] != indeg[i] }
+
+    # Every edge must lie in one weakly connected component; equivalently
+    # every node with a non-zero degree must be reachable from start in the
+    # underlying undirected graph.
+    undirected = Array.new(n) { [] }
+    n.times {|i|
+      n.times {|j|
+        if multiplicity[i][j] > 0 || multiplicity[j][i] > 0
+          undirected[i] << j
+          undirected[j] << i
+        end
+      }
+    }
+    seen = Array.new(n, false)
+    seen[s] = true
+    queue = [s]
+    until queue.empty?
+      i = queue.shift
+      undirected[i].each {|j|
+        next if seen[j]
+        seen[j] = true
+        queue << j
+      }
+    end
+    n.times {|i| return 0 if outdeg[i] > 0 && !seen[i] }
+
+    # BEST theorem:
+    #   ec(s) = t(s) * prod_v (outdeg(v) - 1)!
+    # where t(s) is the number of arborescences oriented towards s, obtained
+    # from any cofactor of the Laplacian L with L[i][j] = -m(i->j) (i != j)
+    # and L[i][i] = outdeg(i) - m(i->i).  ec(s) counts each circuit once per
+    # rotation class, which coincides with fixing the first edge out of s:
+    # the sequences starting at s distribute evenly over the outdeg(s)
+    # choices of first edge.
+    # Isolated nodes are excluded from the Laplacian: they have no incident
+    # edge and would only contribute zero rows to the cofactor.
+    active = (0...n).select {|i| outdeg[i] > 0 }
+    minor_of = active.reject {|i| i == s }
+    minor = minor_of.map {|i|
+      minor_of.map {|j|
+        i == j ? outdeg[i] - multiplicity[i][i] : -multiplicity[i][j]
+      }
+    }
+    trees = integer_determinant(minor)
+
+    result = trees
+    n.times {|i| result *= factorial(outdeg[i] - 1) }
+    result
+  end
+
+  # Exact determinant of a square matrix of Integers by Bareiss'
+  # fraction-free elimination.  Returns 1 for a 0-by-0 matrix.
+  def self.integer_determinant(matrix) # :nodoc:
+    k = matrix.size
+    return 1 if k.zero?
+    a = matrix.map(&:dup)
+    sign = 1
+    previous = 1
+    (0...k - 1).each {|col|
+      if a[col][col].zero?
+        pivot = (col + 1...k).find {|row| !a[row][col].zero? }
+        return 0 unless pivot
+        a[col], a[pivot] = a[pivot], a[col]
+        sign = -sign
+      end
+      pivot_value = a[col][col]
+      (col + 1...k).each {|i|
+        (col + 1...k).each {|j|
+          a[i][j] = (a[i][j] * pivot_value - a[i][col] * a[col][j]) / previous
+        }
+      }
+      previous = pivot_value
+    }
+    sign * a[k - 1][k - 1]
+  end
+  private_class_method :integer_determinant
+
+  def self.factorial(k) # :nodoc:
+    (2..k).inject(1, :*)
+  end
+  private_class_method :factorial
 end

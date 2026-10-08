@@ -60,6 +60,29 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+## Counting Eulerian circuits
+
+`TSort.count_eulerian_circuits` counts the Eulerian circuits of a directed
+multigraph given as a node list and an edge list of `[tail, head]` pairs.
+Parallel edges and loops are allowed, and every edge has its own identity.
+The count uses the BEST theorem (a directed spanning-tree cofactor times
+out-degree factorial factors), so it returns an exact Integer without
+enumerating the circuits.
+
+```ruby
+TSort.count_eulerian_circuits([:a, :b],
+                              [[:a, :b], [:a, :b], [:b, :a], [:b, :a]],
+                              start: :a)
+#=> 2
+```
+
+The counting convention fixes the start node (`start:`) and the first
+traversed edge (`first_edge:`, an index into the edge list, default 0).
+See the method documentation for how to convert the result to other
+conventions (any first edge, cyclic orders, any start node) and for the
+definitions of the degenerate cases (an empty graph or a single isolated
+node counts as one circuit when `start` is a declared node).
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
