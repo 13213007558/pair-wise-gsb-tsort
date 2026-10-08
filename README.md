@@ -60,6 +60,38 @@ end
 #=> [[4], [2, 3], [1]]
 ```
 
+## Network Reliability
+
+TSort::Reliability computes the probability that a source node can
+still reach a sink node when every directed edge survives independently
+with its own probability.  Edges are independent, paths are not: routes
+sharing a common bridge edge are accounted for exactly.  The
+computation uses a frontier-based decision diagram with shared states
+instead of enumerating all 2**E subgraphs, and reports the number of
+states it needed.
+
+```ruby
+require 'tsort'
+
+# Two routes (via :a or via :b) sharing the bridge edge :x->:t.
+edges = [[:s, :a], [:s, :b], [:a, :x], [:b, :x], [:x, :t]]
+rel = TSort::Reliability.new(edges)
+
+# Numeric: one survival probability per edge.
+rel.probability(:s, :t, [0.9, 0.9, 0.9, 0.9, 0.99])
+
+# Exact integer-coefficient polynomial when every edge uses the same
+# variable p (coefficient at index k multiplies p**k).
+rel.polynomial(:s, :t)
+#=> [0, 0, 0, 2, 0, -1]   # 2*p**3 - p**5
+
+# Number of decision-diagram states, for inspection.
+rel.state_count(:s, :t)
+```
+
+Parallel edges between the same pair of nodes are merged into one
+equivalent edge, and self-loops are ignored.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.

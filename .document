@@ -2,3 +2,4 @@ BSDL
 COPYING
 README.md
 lib/tsort.rb
+lib/tsort/reliability.rb
